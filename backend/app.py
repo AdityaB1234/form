@@ -45,7 +45,7 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
     """
     # Update status to processing
     job_status[video_id] = "processing"
-    
+    print("DS")
     try:
         # Process the videos
         import cv2
@@ -53,7 +53,7 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
         import numpy as np
         import json
         import os
-
+        print("DS")
         def extract_keypoints(video_path):
             mp_pose = mp.solutions.pose
             pose = mp_pose.Pose()
@@ -79,7 +79,7 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
             cap.release()
             return np.array(keypoints_data)
 
-        def compute_differences(kp1, kp2, threshold=.5):
+        def compute_differences(kp1, kp2, threshold=.7):
             # Get the minimum length between the two videos
             min_length = min(kp1.shape[0], kp2.shape[0])
             
@@ -98,12 +98,16 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
             # You will need to implement the logic to compare keypoints and return the body part name
             return "Body Part Name"  # Replace with actual logic
 
-        def save_clips(video1_path, video2_path, significant_frames, output_dir=PROCESSED_FOLDER, context_seconds=1.0, min_length=None):
-            
+        def save_clips(video1, video2, significant_frames, output_dir, min_length):
+        
+
+        # Calculate mean differences between consecutive frames
             cap1 = cv2.VideoCapture(video1)
             cap2 = cv2.VideoCapture(video2)
             mean_diffs = []
             frame_indices = []
+            prev_frame1 = None
+            prev_frame2 = None
             while True:
                 ret1, frame1 = cap1.read()
                 ret2, frame2 = cap2.read()
@@ -111,7 +115,7 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
                     break
                 gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
                 gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-                if len(mean_diffs) > 0:
+                if prev_frame1 is not None and prev_frame2 is not None:
                     prev_gray1 = cv2.cvtColor(prev_frame1, cv2.COLOR_BGR2GRAY)
                     prev_gray2 = cv2.cvtColor(prev_frame2, cv2.COLOR_BGR2GRAY)
                     mean_diff = np.mean(np.abs(gray1 - prev_gray1)) + np.mean(np.abs(gray2 - prev_gray2))
@@ -121,41 +125,102 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
                 prev_frame2 = frame2
 
             # Sort mean differences and find top 5%
-            sorted_indices = np.argsort(mean_diffs)[-int(0.05 * len(mean_diffs)):]
-
+            sorted_indices = np.argsort(mean_diffs)[-int(0.10 * len(mean_diffs)):]
+            sorted_indices.sort()
             # Extract frames with 1-second context
             context_frames = []
+            contained = set()
             for idx in sorted_indices:
+                print(idx)
                 start_idx = max(0, idx - 30)  # 30 frames = 1 second at 30fps
                 end_idx = min(len(frame_indices), idx + 30)
-                context_frames.extend(frame_indices[start_idx:end_idx])
+                for i in range(start_idx, end_idx):
+                    if i not in contained:
+                        contained.add(i)
+                        context_frames.append(frame_indices[i])
+
+            # Define a dictionary to map body parts to their corresponding locations
+            body_parts = {
+                'head': (0, 0, 100, 100),
+                'torso': (100, 0, 200, 200),
+                'left_arm': (0, 100, 100, 200),
+                'right_arm': (200, 100, 300, 200),
+                'left_leg': (0, 200, 100, 300),
+                'right_leg': (200, 200, 300, 300)
+            }
+
+            # Define a function to determine the body part with the greatest location of difference
+            def get_body_part(frame1, frame2):
+                gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+                gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+                diff = np.abs(gray1 - gray2)
+                max_diff = np.max(diff)
+                if max_diff > 50:  # threshold for significant difference
+                    x, y = np.unravel_index(np.argmax(diff), diff.shape)
+                    for part, (x1, y1, x2, y2) in body_parts.items():
+                        if x1 <= x <= x2 and y1 <= y <= y2:
+                            return part
+                return 'Unknown'
+
+            # Get video properties
+            height1 = int(cap1.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width1 = int(cap1.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height2 = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width2 = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
+            output_height = max(height1, height2)
 
             # Write extracted frames to output video
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(os.path.join(output_dir, f"{video_id}.mp4"), fourcc, 30.0, (int(cap1.get(3)), int(cap1.get(4))))
+            out = cv2.VideoWriter(os.path.join(output_dir, f"{video_id}.mp4"), fourcc, 30.0, (width1 + width2, output_height))
+
+            # Reset the video capture to the beginning
+            cap1.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            # Iterate over the context frames
             for idx in context_frames:
+                # Read the frames at the current index
+                print(idx)
                 cap1.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ret1, frame1 = cap1.read()
                 cap2.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ret2, frame2 = cap2.read()
-                if height1 != height2:
-                    scale1 = output_height / height1
-                    scale2 = output_height / height2
-                    new_width1 = int(width1 * scale1)
-                    new_width2 = int(width2 * scale2)
-                    frame1 = cv2.resize(frame1, (new_width1, output_height))
-                    frame2 = cv2.resize(frame2, (new_width2, output_height))
-                else:
-                    new_width1 = width1
-                    new_width2 = width2
-                side_by_side = np.hstack((frame1, frame2))
-                out.write(side_by_side)
-            out.release()
-            
-            if frames_written == 0:
-                raise ValueError("No frames were written to the output video")
-            print(f"Total frames written: {frames_written}")
 
+        # Check if the frames are not empty
+                if ret1 and ret2:
+                    # Convert the frames to grayscale
+                    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+                    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+                    # Determine the body part with the greatest location of difference
+                    body_part = get_body_part(frame1, frame2)
+
+                    # Add text to the frame indicating the body part
+                    cv2.putText(frame1, f"Body Part: {body_part}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+                    # Resize the frames to have the same height
+                    if height1 != height2:
+                        scale1 = output_height / height1
+                        scale2 = output_height / height2
+                        new_width1 = int(width1 * scale1)
+                        new_width2 = int(width2 * scale2)
+                        frame1 = cv2.resize(frame1, (new_width1, output_height))
+                        frame2 = cv2.resize(frame2, (new_width2, output_height))
+
+                    # Stack the frames side by side
+                    side_by_side = np.hstack((frame1, frame2))
+
+                    # Write the frame to the output video
+                    out.write(side_by_side)
+                    print("frame written")
+                else:
+                    print(f"Error reading frame {idx}")
+
+        # Release the video capture and writer
+            out.release()
+            cap1.release()
+            cap2.release()
+            print("Video processing complete")
         def process_videos2(video1, video2, output_dir):
             print("Extracting keypoints...")
             try:
@@ -179,51 +244,60 @@ def process_videosREAL(video_id, first_video_path, second_video_path):
             except Exception as e:
                 print(f"Error saving clips: {e}")
                 raise
-        
+
         # Process the videos
         process_videos2(first_video_path, second_video_path, PROCESSED_FOLDER)
-        
+
         # Get the output path
         output_path = os.path.join(PROCESSED_FOLDER, f"{video_id}.mp4")
-        
+
         # Verify the output video exists
         if not os.path.exists(output_path):
             raise ValueError("Processed video was not created successfully")
-        
+
         # Update status to completed
         job_status[video_id] = "completed"
-        
+
         # Return the path to the processed video
         return output_path
-        
+
     except Exception as e:
         print(f"Error processing videos: {e}")
-        job_status[video_id] = "failed"
-        raise
+        raise   
+
+
+        
+    
 
 @app.route('/process_videos', methods=['POST', 'OPTIONS'])
 def process_videos():
     if request.method == 'OPTIONS':
+        print("B2")
         return '', 204
     
     if 'first_video' not in request.files or 'second_video' not in request.files:
+        print("B1")
         return jsonify({'error': 'Missing video files'}), 400
     
     first_video = request.files['first_video']
     second_video = request.files['second_video']
     
     if first_video.filename == '' or second_video.filename == '':
+        print("B3")
         return jsonify({'error': 'No selected files'}), 400
     
     if not (allowed_file(first_video.filename) and allowed_file(second_video.filename)):
+        print("B4")
         return jsonify({'error': 'Invalid file type'}), 400
     
     # Generate unique IDs for the files
+    print("DS")
     video_id = str(uuid.uuid4())
     first_filename = secure_filename(f"{video_id}_first.mp4")
     second_filename = secure_filename(f"{video_id}_second.mp4")
     
     # Save the files
+    print("DS")
     first_path = os.path.join(UPLOAD_FOLDER, first_filename)
     second_path = os.path.join(UPLOAD_FOLDER, second_filename)
     first_video.save(first_path)
@@ -231,6 +305,7 @@ def process_videos():
     
     # Start processing in a background thread
     job_status[video_id] = "processing"
+    print("DS")
     thread = threading.Thread(target=process_videosREAL, args=(video_id, first_path, second_path))
     thread.start()
     
